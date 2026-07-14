@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Buscador Semántico BERT</title>
+    <!-- Tailwind CSS para diseño rápido -->
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 min-h-screen font-sans">
+
+    <div class="max-w-5xl mx-auto px-4 py-8">
+        <!-- Encabezado -->
+        <header class="mb-8 text-center">
+            <h1 class="text-3xl font-bold text-gray-800">Buscador Inteligente de Documentos</h1>
+            <p class="text-gray-600 mt-2">Búsqueda usando IA (BERT)</p>
+        </header>
+
+        <!-- Formulario de Búsqueda -->
+        <div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100 mb-8">
+            <form id="searchForm" class="flex flex-col md:flex-row gap-4">
+                <div class="flex-grow">
+                    <input type="text" id="queryInput" placeholder="¿Qué estás buscando? (ej: nombre, carnet o frase)" 
+                           class="w-full px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition" required>
+                </div>
+                <div class="w-full md:w-32">
+                    <select id="topKInput" class="w-full px-3 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 outline-none bg-white">
+                        <option value="3">3 resultados</option>
+                        <option value="5" selected>5 resultados</option>
+                        <option value="10">10 resultados</option>
+                    </select>
+                </div>
+                <button type="submit" class="w-full md:w-auto px-6 py-3 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 transition shadow-sm">
+                    Buscar
+                </button>
+            </form>
+        </div>
+
+        <!-- Estado de carga / Mensajes -->
+        <div id="statusMessage" class="hidden text-center py-4 text-gray-600 font-medium animate-pulse">
+            Buscando coincidencias semánticas...
+        </div>
+
+        <!-- Tabla de Resultados -->
+        <div class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden hidden" id="resultsContainer">
+            <div class="overflow-x-auto">
+                <table class="w-full text-left border-collapse">
+                    <thead>
+                        <tr class="bg-gray-100 text-gray-700 uppercase text-xs font-semibold tracking-wider border-b border-gray-200">
+                            <th class="px-6 py-4 w-1/4">Archivo</th>
+                            <th class="px-6 py-4 w-12 text-center">Tipo</th>
+                            <th class="px-6 py-4 w-24 text-center">Similitud</th>
+                            <th class="px-6 py-4">Fragmento de Texto Coincidente</th>
+                        </tr>
+                    </thead>
+                    <tbody id="resultsTableBody" class="divide-y divide-gray-200 text-sm text-gray-700">
+                        <!-- Los resultados se insertarán aquí -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        
+        <!-- Mensaje de no resultados -->
+        <div id="noResults" class="hidden text-center py-8 bg-white rounded-xl border border-dashed border-gray-300 text-gray-500">
+            No se encontraron fragmentos relevantes para tu consulta.
+        </div>
+    </div>
+
+    <!-- Lógica de conexión con la API y Resaltado -->
+    <script>
+        // Función para resaltar términos en el texto
+        function resaltarTexto(texto, terminoBusqueda) {
+            if (!terminoBusqueda) return texto;
+            
+            // Limpiamos espacios y separamos por palabras para poder resaltar palabras individuales
+            // si el usuario escribe un nombre completo o frase.
+            const palabras = terminoBusqueda.trim().split(/\s+/).filter(p => p.length > 2);
+            
+            let textoResaltado = texto;
+            
+            // Si es una frase larga o carnet único, intentamos resaltar primero la frase exacta
+            try {
+                const regexExacta = new RegExp(`(${terminoBusqueda.trim()})`, 'gi');
+                textoResaltado = textoResaltado.replace(regexExacta, '<strong class="font-extrabold text-blue-700 bg-blue-50 px-0.5 rounded">$1</strong>');
+                
+                // Luego resaltamos palabras sueltas por si la coincidencia fue parcial (ideal para BERT)
+                palabras.forEach(palabra => {
+                    // Evitamos volver a resaltar lo que ya está dentro de etiquetas HTML
+                    const regexPalabra = new RegExp(`\\b(${palabra})\\b`, 'gi');
+                    // Una alternativa segura para no romper las etiquetas HTML ya añadidas:
+                    textoResaltado = textoResaltado.split(/(<[^>]*>)/).map(part => {
+                        if (part.startsWith('<')) return part; // No tocar etiquetas HTML
+                        return part.replace(regexPalabra, '<strong class="font-extrabold text-blue-700 bg-blue-50 px-0.5 rounded">$1</strong>');
+                    }).join('');
+                });
+            } catch (e) {
+                console.error("Error en el formateo de resaltado: ", e);
+            }
+            
+            return textoResaltado;
+        }
+
+        document.getElementById('searchForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const query = document.getElementById('queryInput').value;
+            const topK = document.getElementById('topKInput').value;
+            
+            const statusMessage = document.getElementById('statusMessage');
+            const resultsContainer = document.getElementById('resultsContainer');
+            const noResults = document.getElementById('noResults');
+            const tableBody = document.getElementById('resultsTableBody');
+            
+            // Mostrar loader y limpiar estado anterior
+            statusMessage.classList.remove('hidden');
+            resultsContainer.classList.add('hidden');
+            noResults.classList.add('hidden');
+            tableBody.innerHTML = '';
+            
+            try {
+                // Petición HTTP GET al endpoint de FastAPI
+                const response = await fetch(`/buscar?q=${encodeURIComponent(query)}&top_k=${topK}`);
+                
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.detail || 'Error en la búsqueda');
+                }
+                
+                const data = await response.json();
+                statusMessage.classList.add('hidden');
+                
+                if (data.length === 0) {
+                    noResults.classList.remove('hidden');
+                    return;
+                }
+                
+                // Construir las filas de la tabla
+                data.forEach(item => {
+                    const score = item.similitul !== undefined ? item.similitul : item.similitud;
+                    const porcentaje = Math.round(score * 100);
+                    
+                    let badgeColor = 'bg-green-100 text-green-800';
+                    if (porcentaje < 60) badgeColor = 'bg-yellow-100 text-yellow-800';
+                    if (porcentaje < 40) badgeColor = 'bg-red-100 text-red-800';
+                    
+                    // Aplicar la función de resaltado al fragmento de texto
+                    const fragmentoConMatch = resaltarTexto(item.fragmento, query);
+                    
+                    // Reemplazar saltos de línea físicos por <br> para que se vean las 2 líneas correctamente
+                    const fragmentoFormateado = fragmentoConMatch.replace(/\n/g, '<br>');
+                    
+                    const row = `
+                        <tr class="hover:bg-gray-50 transition">
+                            <td class="px-6 py-4 font-medium text-gray-900 break-all">${item.archivo}</td>
+                            <td class="px-6 py-4 text-center">
+                                <span class="px-2 py-1 bg-gray-200 text-gray-700 text-xs font-semibold rounded uppercase">${item.tipo.replace('.', '')}</span>
+                            </td>
+                            <td class="px-6 py-4 text-center">
+                                <span class="px-2.5 py-1 ${badgeColor} text-xs font-bold rounded-full">${porcentaje}%</span>
+                            </td>
+                            <td class="px-6 py-4 text-gray-600 leading-relaxed whitespace-normal">
+                                <div class="bg-gray-50 p-2 rounded border border-gray-100 italic">
+                                    ... ${fragmentoFormateado} ...
+                                </div>
+                            </td>
+                        </tr>
+                    `;
+                    tableBody.innerHTML += row;
+                });
+                
+                resultsContainer.classList.remove('hidden');
+                
+            } catch (error) {
+                statusMessage.classList.add('hidden');
+                alert(`Error: ${error.message}. Asegúrate de haber ejecutado la indexación inicial.`);
+            }
+        });
+    </script>
+</body>
+</html>
